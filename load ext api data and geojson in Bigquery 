@@ -1,0 +1,60 @@
+import json
+import requests
+import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions
+
+# Define pipeline options
+class ETLGeoJSONOptions(PipelineOptions):
+    @classmethod
+    def _add_argparse_args(cls, parser):
+        parser.add_value_provider_argument('--input', type=str, help='Path to input GeoJSON file in GCS')
+        parser.add_value_provider_argument('--output', type=str, help='BigQuery table for processed data')
+
+# API to fetch population data (dummy example)
+API_URL = "https://api.populationdata.com/state"
+
+# Fetch population data from an external API
+def fetch_population_data(state_name):
+    response = requests.get(f"{API_URL}?state={state_name}")
+    if response.status_code == 200:
+        return response.json().get('population', None)
+    return None
+
+# Define transformation function for processing both GeoJSON and API data
+def process_geojson_and_api(element):
+    geojson_obj = json.loads(element)
+    features = geojson_obj['features']
+    
+    for feature in features:
+        properties = feature['properties']
+        state_name = properties.get('name')
+        geometry = feature['geometry']
+        
+        # Fetch additional data from API
+        population = fetch_population_data(state_name)
+        
+        yield {
+            'state_name': state_name,
+            'population': population,  # Use population from the API
+            'geometry': str(geometry)
+        }
+
+# BigQuery schema
+SCHEMA = 'state_name:STRING, population:INTEGER, geometry:STRING'
+
+def run():
+    pipeline_options = PipelineOptions()
+    geojson_options = pipeline_options.view_as(ETLGeoJSONOptions)
+
+    with beam.Pipeline(options=pipeline_options) as p:
+        (p 
+         | 'Read from GCS' >> beam.io.ReadFromText(geojson_options.input)
+         | 'Process GeoJSON and API' >> beam.ParDo(process_geojson_and_api)
+         | 'Write to BigQuery' >> beam.io.WriteToBigQuery(
+                geojson_options.output,
+                schema=SCHEMA,
+                write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND)
+        )
+
+if __name__ == '__main__':
+    run()
